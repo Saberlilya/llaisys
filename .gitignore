@@ -100,7 +100,7 @@ build/
 .xmake/
 *.o
 *.so
-libllaisys/
+/libllaisys/
 bin/
 
 # 忽略 Python 缓存
