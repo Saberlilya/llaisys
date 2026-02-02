@@ -180,20 +180,19 @@ void Tensor::load(const void *src) {
 // 2. IsContiguous: 判断张量是否在内存中连续紧密排列
 // =================================================================================
 bool Tensor::isContiguous() const {
-    // 【修正】使用 ptrdiff_t 类型，与 strides 类型保持一致，避免编译报错
+    // strides 是 ptrdiff_t，所以累计 stride 也用 ptrdiff_t
     ptrdiff_t z = 1;
 
-    // 从最后一个维度向前遍历
-    for (int i = _meta.shape.size() - 1; i >= 0; i--) {
-        // 如果当前维度的步长不等于期望步长，说明不连续
+    // 用 size_t 反向循环，避免 size_t -> int 的警告
+    for (size_t i = _meta.shape.size(); i-- > 0;) {
         if (_meta.strides[i] != z) {
             return false;
         }
-        // 更新期望步长 = 当前期望步长 * 当前维度大小
-        z *= _meta.shape[i];
+        z *= static_cast<ptrdiff_t>(_meta.shape[i]);
     }
     return true;
 }
+
 
 // =================================================================================
 // 4. Permute: 交换维度
@@ -227,11 +226,14 @@ tensor_t Tensor::view(const std::vector<size_t> &shape) const {
     ASSERT(this->isContiguous(), "Currently only support view on contiguous tensor");
 
     std::vector<ptrdiff_t> new_strides(shape.size());
-    ptrdiff_t stride = 1;
-    for (int i = shape.size() - 1; i >= 0; i--) {
-        new_strides[i] = stride;
-        stride *= shape[i];
-    }
+ptrdiff_t stride = 1;
+
+// 用 size_t 反向循环，避免 size_t -> int 的警告
+for (size_t i = shape.size(); i-- > 0;) {
+    new_strides[i] = stride;
+    stride *= static_cast<ptrdiff_t>(shape[i]);
+}
+
 
     TensorMeta new_meta = _meta;
     new_meta.shape = shape;
