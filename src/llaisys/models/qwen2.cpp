@@ -172,11 +172,15 @@ __export struct LlaisysQwen2Weights *llaisysQwen2ModelWeights(struct LlaisysQwen
 
 // One forward pass on a chunk of "new tokens" of length seqlen.
 // It consumes tokens, writes KV into cache, and returns logits for last position.
-static int64_t qwen2_forward_and_argmax_next(LlaisysQwen2Model *m,
-                                            const int64_t *token_ids,
-                                            size_t seqlen) {
-    if (!m) throw std::runtime_error("model is null");
-    if (!token_ids || seqlen == 0) throw std::runtime_error("token_ids empty");
+static bool qwen2_forward_and_argmax_next(LlaisysQwen2Model *m,
+                                         const int64_t *token_ids,
+                                         size_t seqlen,
+                                         int64_t *out_next_tok) {
+    if (!out_next_tok) return false;
+    *out_next_tok = -1;
+
+    if (!m) return false;
+    if (!token_ids || seqlen == 0) return false;
 
     const auto &meta = m->meta;
     size_t hs   = meta.hs;
@@ -186,17 +190,15 @@ static int64_t qwen2_forward_and_argmax_next(LlaisysQwen2Model *m,
     size_t di   = meta.di;
     size_t voc  = meta.voc;
 
-    if (m->past_len + seqlen > meta.maxseq) {
-        throw std::runtime_error("KV cache overflow: past_len + seqlen > maxseq");
-    }
+    if (m->past_len + seqlen > meta.maxseq) return false;
 
     // ---- Build index tensor [seqlen] int64 ----
     auto idx = make_i64_tensor_1d(seqlen, m->device, m->device_id);
     idx->load(token_ids);
 
     // ---- Embedding: x = embed(tokens) -> [seqlen, hs] ----
+    if (!m->weights.in_embed) return false;
     auto x = make_tensor({seqlen, hs}, meta.dtype, m->device, m->device_id);
-    if (!m->weights.in_embed) throw std::runtime_error("weights.in_embed not set");
     llaisys::ops::embedding(x, idx, as_tensor(m->weights.in_embed));
 
     // position ids: [seqlen], values [past_len ... past_len+seqlen-1]
@@ -207,22 +209,26 @@ static int64_t qwen2_forward_and_argmax_next(LlaisysQwen2Model *m,
 
     // ---- Transformer blocks ----
     for (size_t l = 0; l < meta.nlayer; ++l) {
+        if (!m->weights.attn_norm_w[l]) return false;
+        if (!m->weights.attn_q_w[l]) return false;
+        if (!m->weights.attn_k_w[l]) return false;
+        if (!m->weights.attn_v_w[l]) return false;
+        if (!m->weights.attn_o_w[l]) return false;
+        if (!m->weights.mlp_norm_w[l]) return false;
+        if (!m->weights.mlp_gate_w[l]) return false;
+        if (!m->weights.mlp_up_w[l]) return false;
+        if (!m->weights.mlp_down_w[l]) return false;
+
         // 1) attn rmsnorm
         auto x_norm = make_tensor({seqlen, hs}, meta.dtype, m->device, m->device_id);
-        if (!m->weights.attn_norm_w[l]) throw std::runtime_error("attn_norm_w missing");
         llaisys::ops::rms_norm(x_norm, x, as_tensor(m->weights.attn_norm_w[l]), meta.epsilon);
 
         // 2) q/k/v projections
-        // q: [seqlen, hs]
         auto q_lin = make_tensor({seqlen, hs}, meta.dtype, m->device, m->device_id);
-        if (!m->weights.attn_q_w[l]) throw std::runtime_error("attn_q_w missing");
         llaisys::ops::linear(q_lin, x_norm, as_tensor(m->weights.attn_q_w[l]), as_tensor(m->weights.attn_q_b[l]));
 
-        // k/v output dim is nkvh*dh
         auto k_lin = make_tensor({seqlen, nkvh * dh}, meta.dtype, m->device, m->device_id);
         auto v_lin = make_tensor({seqlen, nkvh * dh}, meta.dtype, m->device, m->device_id);
-        if (!m->weights.attn_k_w[l]) throw std::runtime_error("attn_k_w missing");
-        if (!m->weights.attn_v_w[l]) throw std::runtime_error("attn_v_w missing");
         llaisys::ops::linear(k_lin, x_norm, as_tensor(m->weights.attn_k_w[l]), as_tensor(m->weights.attn_k_b[l]));
         llaisys::ops::linear(v_lin, x_norm, as_tensor(m->weights.attn_v_w[l]), as_tensor(m->weights.attn_v_b[l]));
 
@@ -238,23 +244,15 @@ static int64_t qwen2_forward_and_argmax_next(LlaisysQwen2Model *m,
         llaisys::ops::rope(k_rope, k, pos_ids, meta.theta);
 
         // 5) write k/v into cache at [past_len : past_len + seqlen)
-        //    We do it by slicing cache and using rearrange/add-like? You do not have a "copy" op,
-        //    but your Tensor is contiguous and we can memcpy directly on CPU.
-        //    Since assignment device is CPU for tests, this is fine.
-        //
-        //    For correctness with device abstraction, you can replace this with a "rearrange"/copy op later.
         {
-            // cache: [maxseq, nkvh, dh], contiguous
-            // target slice shape: [seqlen, nkvh, dh], contiguous
             auto k_dst = m->k_cache[l]->slice(0, m->past_len, m->past_len + seqlen);
             auto v_dst = m->v_cache[l]->slice(0, m->past_len, m->past_len + seqlen);
 
-            // direct memcpy (CPU only)
-            // NOTE: if you later run on GPU, replace with runtime memcpy.
-            std::memcpy(k_dst->data(), k_rope->data(), k_rope->numel() * k_rope->elementSize());
-            std::memcpy(v_dst->data(), v->data(), v->numel() * v->elementSize());
-
-
+            // bytes = numel * elementSize
+            std::memcpy(k_dst->data(), q_rope ? k_rope->data() : k_rope->data(),
+                        k_rope->numel() * k_rope->elementSize());
+            std::memcpy(v_dst->data(), v->data(),
+                        v->numel() * v->elementSize());
         }
 
         size_t total_len = m->past_len + seqlen;
@@ -272,24 +270,20 @@ static int64_t qwen2_forward_and_argmax_next(LlaisysQwen2Model *m,
 
         // 8) output proj
         auto attn_out = make_tensor({seqlen, hs}, meta.dtype, m->device, m->device_id);
-        if (!m->weights.attn_o_w[l]) throw std::runtime_error("attn_o_w missing");
         llaisys::ops::linear(attn_out, attn_merge, as_tensor(m->weights.attn_o_w[l]), nullptr);
 
-        // 9) residual add: x = x + attn_out
+        // 9) residual add
         auto x_attn = make_tensor({seqlen, hs}, meta.dtype, m->device, m->device_id);
         llaisys::ops::add(x_attn, x, attn_out);
         x = x_attn;
 
         // 10) mlp rmsnorm
         auto x_mlp_norm = make_tensor({seqlen, hs}, meta.dtype, m->device, m->device_id);
-        if (!m->weights.mlp_norm_w[l]) throw std::runtime_error("mlp_norm_w missing");
         llaisys::ops::rms_norm(x_mlp_norm, x, as_tensor(m->weights.mlp_norm_w[l]), meta.epsilon);
 
         // 11) gate/up
         auto gate = make_tensor({seqlen, di}, meta.dtype, m->device, m->device_id);
         auto up   = make_tensor({seqlen, di}, meta.dtype, m->device, m->device_id);
-        if (!m->weights.mlp_gate_w[l]) throw std::runtime_error("mlp_gate_w missing");
-        if (!m->weights.mlp_up_w[l]) throw std::runtime_error("mlp_up_w missing");
         llaisys::ops::linear(gate, x_mlp_norm, as_tensor(m->weights.mlp_gate_w[l]), nullptr);
         llaisys::ops::linear(up,   x_mlp_norm, as_tensor(m->weights.mlp_up_w[l]),   nullptr);
 
@@ -297,9 +291,8 @@ static int64_t qwen2_forward_and_argmax_next(LlaisysQwen2Model *m,
         auto act = make_tensor({seqlen, di}, meta.dtype, m->device, m->device_id);
         llaisys::ops::swiglu(act, gate, up);
 
-        // 13) down proj -> [seqlen, hs]
+        // 13) down proj
         auto down = make_tensor({seqlen, hs}, meta.dtype, m->device, m->device_id);
-        if (!m->weights.mlp_down_w[l]) throw std::runtime_error("mlp_down_w missing");
         llaisys::ops::linear(down, act, as_tensor(m->weights.mlp_down_w[l]), nullptr);
 
         // 14) residual add
@@ -311,38 +304,34 @@ static int64_t qwen2_forward_and_argmax_next(LlaisysQwen2Model *m,
     // update cache length AFTER processing this chunk
     m->past_len += seqlen;
 
-    // ---- final norm ----
+    // final norm
+    if (!m->weights.out_norm_w) return false;
     auto x_final = make_tensor({seqlen, hs}, meta.dtype, m->device, m->device_id);
-    if (!m->weights.out_norm_w) throw std::runtime_error("out_norm_w missing");
     llaisys::ops::rms_norm(x_final, x, as_tensor(m->weights.out_norm_w), meta.epsilon);
 
-    // ---- lm head: logits [seqlen, voc] ----
-    if (!m->weights.out_embed) throw std::runtime_error("out_embed missing (lm_head.weight)");
+    // logits
+    if (!m->weights.out_embed) return false;
     auto logits = make_tensor({seqlen, voc}, meta.dtype, m->device, m->device_id);
     llaisys::ops::linear(logits, x_final, as_tensor(m->weights.out_embed), nullptr);
 
-    // ---- take last position logits -> 1D [voc] ----
-    auto logits_last2d = logits->slice(0, seqlen - 1, seqlen); // [1, voc]
-    auto logits_last1d = logits_last2d->view({voc});           // [voc]
+    auto logits_last2d = logits->slice(0, seqlen - 1, seqlen);
+    auto logits_last1d = logits_last2d->view({voc});
 
-    // ---- argmax over vocab ----
     auto max_idx = make_tensor({1}, LLAISYS_DTYPE_I64, m->device, m->device_id);
     auto max_val = make_tensor({1}, meta.dtype, m->device, m->device_id);
     llaisys::ops::argmax(max_idx, max_val, logits_last1d);
 
-    // read max_idx (CPU)
-    int64_t next_tok = *(reinterpret_cast<int64_t *>(max_idx->data()));
-    return next_tok;
+    *out_next_tok = *(reinterpret_cast<int64_t *>(max_idx->data()));
+    return true;
 }
 
-__export int64_t llaisysQwen2ModelInfer(struct LlaisysQwen2Model *model, int64_t *token_ids, size_t ntoken) {
-    try {
-        return qwen2_forward_and_argmax_next(model, token_ids, ntoken);
-    } catch (const std::exception &e) {
-        // For debugging: you can print error message here
-        // fprintf(stderr, "Qwen2Infer error: %s\n", e.what());
-        return -1;
-    }
+__export int64_t llaisysQwen2ModelInfer(struct LlaisysQwen2Model *model,
+                                       int64_t *token_ids,
+                                       size_t ntoken) {
+    int64_t next_tok = -1;
+    bool ok = qwen2_forward_and_argmax_next(model, token_ids, ntoken, &next_tok);
+    return ok ? next_tok : -1;
 }
+
 
 } // __C
