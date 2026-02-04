@@ -163,9 +163,7 @@ void Tensor::debug() const {
     }
 }
 
-// =================================================================================
 // 1. Load: 将数据从 Host 拷贝到 Tensor 的存储设备
-// =================================================================================
 void Tensor::load(const void *src) {
     // 计算总字节数 = 元素个数 * 单个元素大小
     size_t size = this->numel() * utils::dsize(_meta.dtype);
@@ -176,9 +174,8 @@ void Tensor::load(const void *src) {
     // 执行同步内存拷贝 (Host -> Device)
     api->memcpy_sync(this->data(), src, size, LLAISYS_MEMCPY_H2D);
 }
-// =================================================================================
+
 // 2. IsContiguous: 判断张量是否在内存中连续紧密排列
-// =================================================================================
 bool Tensor::isContiguous() const {
     // strides 是 ptrdiff_t，所以累计 stride 也用 ptrdiff_t
     ptrdiff_t z = 1;
@@ -194,9 +191,8 @@ bool Tensor::isContiguous() const {
 }
 
 
-// =================================================================================
+
 // 4. Permute: 交换维度
-// =================================================================================
 tensor_t Tensor::permute(const std::vector<size_t> &order) const {
     ASSERT(order.size() == _meta.shape.size(), "Order size must match ndim");
     
@@ -212,13 +208,11 @@ tensor_t Tensor::permute(const std::vector<size_t> &order) const {
     new_meta.shape = new_shape;
     new_meta.strides = new_strides;
 
-    // 【修正】改用 new Tensor(...)
     return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, _offset));
 }
 
-// =================================================================================
+
 // 3. View: 改变形状
-// =================================================================================
 tensor_t Tensor::view(const std::vector<size_t> &shape) const {
     size_t numel = 1;
     for (auto s : shape) numel *= s;
@@ -239,14 +233,11 @@ for (size_t i = shape.size(); i-- > 0;) {
     new_meta.shape = shape;
     new_meta.strides = new_strides;
 
-    // 【修正】不能用 make_shared，因为构造函数是私有的。
-    // 改用 std::shared_ptr<Tensor>(new Tensor(...))
     return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, _offset));
 }
 
-// =================================================================================
+
 // 5. Slice: 切片
-// =================================================================================
 tensor_t Tensor::slice(size_t dim, size_t start, size_t end) const {
     ASSERT(dim < _meta.shape.size(), "Dimension out of range");
     ASSERT(start < end && end <= _meta.shape[dim], "Invalid slice range");
@@ -257,7 +248,6 @@ tensor_t Tensor::slice(size_t dim, size_t start, size_t end) const {
     size_t inc_offset = start * _meta.strides[dim] * utils::dsize(_meta.dtype);
     size_t new_offset = _offset + inc_offset;
 
-    // 【修正】改用 new Tensor(...)
     return std::shared_ptr<Tensor>(new Tensor(new_meta, _storage, new_offset));
 }
 
