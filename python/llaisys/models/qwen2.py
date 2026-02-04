@@ -272,7 +272,7 @@ class Qwen2:
                 w.mlp_down_w[idx] = handle
                 return
 
-    # -----------------------------
+    # --------------------------------
     # Generation (argmax baseline)
     # -----------------------------
     def generate(self, inputs: Sequence[int], max_new_tokens: int = 128, **kwargs) -> List[int]:
