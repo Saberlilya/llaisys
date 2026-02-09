@@ -53,3 +53,4 @@ class Ops:
     @staticmethod
     def swiglu(out: Tensor, gate: Tensor, up: Tensor):
         LIB_LLAISYS.llaisysSwiGLU(out.lib_tensor(), gate.lib_tensor(), up.lib_tensor())
+# trigger ci
